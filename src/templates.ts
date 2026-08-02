@@ -74,10 +74,11 @@ if command -v rtk >/dev/null 2>&1; then
 
   # Only trust single-line output that invokes rtk; anything else (warnings,
   # trust prompts, multi-line noise) must not reach bash -c.
-  # env values may contain %q-escaped spaces (FOO=a\\ b), hence ([^ ]|\\\\ )*.
-  # The tail rejects unescaped shell metacharacters: %q-escaped input never
-  # produces bare ; & | < > $ \` so a compliant rtk rewrite never needs them.
-  rtk_shape='^(sudo +)?(env +([A-Za-z_][A-Za-z0-9_]*=([^ ]|\\\\ )* +)*)?rtk (\\\\.|[^;&|<>$\`\\\\])+$'
+  # %q-escaped input never produces bare shell metacharacters, so both env
+  # values and the tail accept any backslash-escaped char (\\., incl. \\ for
+  # spaces) but reject unescaped ; & | < > $ \` — those only appear in
+  # non-compliant rtk stdout, which must not reach bash -c.
+  rtk_shape='^(sudo +)?(env +([A-Za-z_][A-Za-z0-9_]*=(\\\\.|[^ ;&|<>$\`\\\\])* +)*)?rtk (\\\\.|[^;&|<>$\`\\\\])+$'
   if [[ -n "\${rewritten_command}" && "\${rewritten_command}" != "\${original_command}" \\
         && "\${rewritten_command}" != *$'\\n'* \\
         && "\${rewritten_command}" =~ \$rtk_shape ]]; then
