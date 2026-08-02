@@ -339,6 +339,107 @@ export async function uninstallCodexConfig(): Promise<void> {
   process.stdout.write(`Removed RTK shim config block from ${configFile}\n`);
 }
 
+const SHELL_HOOK_START = "# BEGIN RTK SHIM SHELL HOOK";
+const SHELL_HOOK_END = "# END RTK SHIM SHELL HOOK";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shellHookRegex(): RegExp {
+  return new RegExp(`^\\s*${escapeRegExp(SHELL_HOOK_START)}\\n[\\s\\S]*?^\\s*${escapeRegExp(SHELL_HOOK_END)}\\n?`, "m");
+}
+
+export function getDefaultShellRcFile(): string {
+  return process.env.RTK_SHIM_RC_FILE ?? path.join(os.homedir(), ".zshrc");
+}
+
+export function buildShellHookBlock(shimRoot = getDefaultShimHome()): string {
+  const shimBinDir = path.join(shimRoot, "bin");
+  const logFile = path.join(shimRoot, "shim.log");
+  return `${SHELL_HOOK_START}
+# Prepend rtk-codex shims inside AI agent sessions (Google Antigravity).
+# Force on in any shell with RTK_SHIM_SHELL=1; Codex is covered separately
+# via the managed block in ~/.codex/config.toml.
+if [ -n "\${ANTIGRAVITY_AGENT:-}" ] || [ "\${RTK_SHIM_SHELL:-0}" = "1" ]; then
+  case ":\$PATH:" in
+    *":${shimBinDir}:"*) ;;
+    *) export PATH="${shimBinDir}:\$PATH" ;;
+  esac
+  if [ -z "\${RTK_SHIM_LOG_FILE:-}" ]; then
+    export RTK_SHIM_LOG_FILE="${logFile}"
+  fi
+fi
+${SHELL_HOOK_END}
+`;
+}
+
+export async function installShellHook(options: { shimRoot?: string; rcFile?: string } = {}): Promise<void> {
+  const shimRoot = options.shimRoot ?? getDefaultShimHome();
+  const rcFile = options.rcFile ?? getDefaultShellRcFile();
+
+  await installShims(shimRoot);
+
+  const block = normalizeNewline(buildShellHookBlock(shimRoot).trimEnd());
+  const existingText = (await readTextIfExists(rcFile)) ?? "";
+  const regex = shellHookRegex();
+  const newText = regex.test(existingText)
+    ? existingText.replace(regex, block)
+    : `${existingText.trimEnd()}${existingText.trim() ? "\n\n" : ""}${block}`;
+  await writeFile(rcFile, normalizeSpacing(newText), "utf8");
+  process.stdout.write(`Installed RTK shim shell hook into ${rcFile}\n`);
+}
+
+export async function uninstallShellHook(options: { rcFile?: string } = {}): Promise<void> {
+  const rcFile = options.rcFile ?? getDefaultShellRcFile();
+  const existingText = await readTextIfExists(rcFile);
+  if (existingText !== null) {
+    const newText = existingText.replace(shellHookRegex(), "").replace(/\n{3,}/g, "\n\n").trimEnd();
+    await writeFile(rcFile, newText ? `${newText}\n` : "", "utf8");
+  }
+  process.stdout.write(`Removed RTK shim shell hook from ${rcFile}\n`);
+}
+
+export async function testShellHook(): Promise<void> {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "rtk-codex-shellhook-"));
+  try {
+    const rcFile = path.join(tempRoot, ".zshrc");
+    const shimRoot = path.join(tempRoot, ".rtk-codex");
+
+    await writeFile(rcFile, "# user rc\nexport FOO=1\n", "utf8");
+    await installShellHook({ shimRoot, rcFile });
+    const first = await readFile(rcFile, "utf8");
+    assert.match(first, /BEGIN RTK SHIM SHELL HOOK/);
+    assert.match(first, /export FOO=1/);
+
+    await installShellHook({ shimRoot, rcFile });
+    const second = await readFile(rcFile, "utf8");
+    assert.equal((second.match(/BEGIN RTK SHIM SHELL HOOK/g) ?? []).length, 1);
+
+    const shimBinDir = path.join(shimRoot, "bin");
+    for (const [env, expectShim] of [
+      [{ ANTIGRAVITY_AGENT: "1" }, true],
+      [{ RTK_SHIM_SHELL: "1" }, true],
+      [{}, false],
+    ] as Array<[NodeJS.ProcessEnv, boolean]>) {
+      const probe = runCommand("bash", ["-c", `. "${rcFile}" && printf '%s' "$PATH"`], {
+        env: { ...process.env, ANTIGRAVITY_AGENT: "", RTK_SHIM_SHELL: "", ...env },
+      });
+      assert.equal(probe.status, 0);
+      assert.equal(probe.stdout.startsWith(`${shimBinDir}:`), expectShim, JSON.stringify(env));
+    }
+
+    await uninstallShellHook({ rcFile });
+    const removed = await readFile(rcFile, "utf8");
+    assert.doesNotMatch(removed, /RTK SHIM SHELL HOOK/);
+    assert.match(removed, /export FOO=1/);
+
+    process.stdout.write("Shell hook install/uninstall tests passed\n");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
 function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): { stdout: string; status: number } {
   const result = spawnSync(command, args, {
     cwd: options.cwd,

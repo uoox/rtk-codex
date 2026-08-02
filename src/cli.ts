@@ -3,7 +3,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { installCodexConfig, testCodexConfig, testShims, uninstallCodexConfig, updateSupportedCommands, validateTmux } from "./core.js";
+import { installCodexConfig, installShellHook, testCodexConfig, testShellHook, testShims, uninstallCodexConfig, uninstallShellHook, updateSupportedCommands, validateTmux } from "./core.js";
 
 function printHelp(version: string): void {
   process.stdout.write(`rtk-codex ${version}
@@ -14,10 +14,13 @@ Usage:
 Commands:
   install         Install machine-level shims and the managed Codex config block
   uninstall       Remove only the managed Codex config block
+  install-shell   Install shims plus a shell rc hook for AI agent sessions (Antigravity)
+  uninstall-shell Remove the managed shell rc hook
   update          Refresh shim coverage from the pinned RTK upstream ref
   validate-tmux   Run end-to-end Codex CLI validation in tmux
   test-config     Run installer/config tests
   test-shims      Run low-level shim rewrite tests
+  test-shell      Run shell rc hook install/uninstall tests
   help            Show this help
   version         Print the package version
 
@@ -50,6 +53,12 @@ async function main(): Promise<void> {
     case "uninstall":
       await uninstallCodexConfig();
       return;
+    case "install-shell":
+      await installShellHook({ rcFile: parseRcFlag(args) });
+      return;
+    case "uninstall-shell":
+      await uninstallShellHook({ rcFile: parseRcFlag(args) });
+      return;
     case "update": {
       let refOverride: string | undefined;
       for (let index = 1; index < args.length; index += 1) {
@@ -72,12 +81,29 @@ async function main(): Promise<void> {
     case "test-config":
       await testCodexConfig();
       return;
+    case "test-shell":
+      await testShellHook();
+      return;
     case "test-shims":
       await testShims();
       return;
     default:
       throw new Error(`unknown command: ${subcommand}`);
   }
+}
+
+function parseRcFlag(args: string[]): string | undefined {
+  for (let index = 1; index < args.length; index += 1) {
+    if (args[index] === "--rc") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("missing value for --rc");
+      }
+      return value;
+    }
+    throw new Error(`unknown argument: ${args[index]}`);
+  }
+  return undefined;
 }
 
 async function getPackageVersion(): Promise<string> {
