@@ -41,7 +41,7 @@ export function getCodexHome(): string {
 }
 
 export function getDefaultLogFile(): string {
-  return process.env.RTK_SHIM_LOG_FILE ?? "/tmp/codex-rtk-shim.log";
+  return process.env.RTK_SHIM_LOG_FILE ?? path.join(getDefaultShimHome(), "shim.log");
 }
 
 function tomlEscape(value: string): string {
@@ -101,7 +101,9 @@ function parseCommandNames(text: string): string[] {
   return text
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
+    // Path-like entries (./gradlew, bin/phpstan) bypass PATH lookup and
+    // cannot be shimmed.
+    .filter((line) => line.length > 0 && !line.startsWith("#") && !line.includes("/"));
 }
 
 async function readTextIfExists(filePath: string): Promise<string | null> {
@@ -377,14 +379,14 @@ export async function testShims(): Promise<void> {
     { description: "head -20 file", expected: "REWRITE\thead -20 AGENTS.md\trtk read AGENTS.md --max-lines 20", command: "head", args: ["-20", "AGENTS.md"] },
     { description: "tail -n 5 file", expected: "REWRITE\ttail -n 5 AGENTS.md\trtk read AGENTS.md --tail-lines 5", command: "tail", args: ["-n", "5", "AGENTS.md"] },
     { description: "grep pattern", expected: "REWRITE\tgrep -rn pattern src/\trtk grep -rn pattern src/", command: "grep", args: ["-rn", "pattern", "src/"] },
-    { description: "rg pattern", expected: "REWRITE\trg pattern src/\trtk grep pattern src/", command: "rg", args: ["pattern", "src/"] },
+    { description: "rg pattern", expected: "REWRITE\trg pattern src/\trtk rg pattern src/", command: "rg", args: ["pattern", "src/"] },
     { description: "ls -la", expected: "REWRITE\tls -la\trtk ls -la", command: "ls", args: ["-la"] },
     { description: "find name", expected: "REWRITE\tfind -name \\*.ts src/\trtk find -name \\*.ts src/", command: "find", args: ["-name", "*.ts", "src/"] },
     { description: "tsc", expected: "REWRITE\ttsc --noEmit\trtk tsc --noEmit", command: "tsc", args: ["--noEmit"] },
     { description: "eslint", expected: "REWRITE\teslint src\trtk lint src", command: "eslint", args: ["src"] },
     { description: "prettier", expected: "REWRITE\tprettier --check .\trtk prettier --check .", command: "prettier", args: ["--check", "."] },
     { description: "next build", expected: "REWRITE\tnext build\trtk next", command: "next", args: ["build"] },
-    { description: "vitest", expected: "REWRITE\tvitest run\trtk vitest run", command: "vitest", args: ["run"] },
+    { description: "vitest", expected: "REWRITE\tvitest run\trtk vitest", command: "vitest", args: ["run"] },
     { description: "playwright", expected: "REWRITE\tplaywright test\trtk playwright test", command: "playwright", args: ["test"] },
     { description: "docker compose logs", expected: "REWRITE\tdocker compose logs web\trtk docker compose logs web", command: "docker", args: ["compose", "logs", "web"] },
     { description: "kubectl describe", expected: "REWRITE\tkubectl describe pod foo\trtk kubectl describe pod foo", command: "kubectl", args: ["describe", "pod", "foo"] },

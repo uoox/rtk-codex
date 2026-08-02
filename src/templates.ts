@@ -13,6 +13,7 @@ log_event() {
   if [[ -n "\${RTK_SHIM_LOG_FILE:-}" ]]; then
     mkdir -p "$(dirname "\${RTK_SHIM_LOG_FILE}")"
     {
+      [[ -e "\${RTK_SHIM_LOG_FILE}" ]] || { : >> "\${RTK_SHIM_LOG_FILE}"; chmod 600 "\${RTK_SHIM_LOG_FILE}"; }
       printf '%s\\t%s\\t%s\\t%s\\n' \\
         "$(date '+%Y-%m-%dT%H:%M:%S%z')" \\
         "\${decision}" \\
@@ -68,7 +69,12 @@ original_command="$(build_command_line "$@")"
 if command -v rtk >/dev/null 2>&1; then
   rewritten_command="$(rtk rewrite "\${original_command}" 2>/dev/null || true)"
 
-  if [[ -n "\${rewritten_command}" && "\${rewritten_command}" != "\${original_command}" ]]; then
+  # Only trust single-line output that invokes rtk; anything else (warnings,
+  # trust prompts, multi-line noise) must not reach bash -c.
+  rtk_shape='^(sudo +)?(env +([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)*)?rtk .+'
+  if [[ -n "\${rewritten_command}" && "\${rewritten_command}" != "\${original_command}" \\
+        && "\${rewritten_command}" != *$'\\n'* \\
+        && "\${rewritten_command}" =~ \$rtk_shape ]]; then
     log_event "rewrite" "\${original_command}" "\${rewritten_command}"
     if [[ "\${RTK_SHIM_DRY_RUN:-0}" == "1" ]]; then
       printf 'REWRITE\\t%s\\t%s\\n' "\${original_command}" "\${rewritten_command}"
