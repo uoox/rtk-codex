@@ -3,6 +3,9 @@ export function buildDispatcherScript(): string {
 set -euo pipefail
 
 cmd_name="\${RTK_SHIM_COMMAND:-$(basename "$0")}"
+# Don't leak the shim command name into the real command's children: nested
+# agent shells re-prepend the shim dir and would mistake every shim for it.
+unset RTK_SHIM_COMMAND
 shim_bin_dir="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 
 log_event() {
@@ -71,7 +74,10 @@ if command -v rtk >/dev/null 2>&1; then
 
   # Only trust single-line output that invokes rtk; anything else (warnings,
   # trust prompts, multi-line noise) must not reach bash -c.
-  rtk_shape='^(sudo +)?(env +([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)*)?rtk .+'
+  # env values may contain %q-escaped spaces (FOO=a\\ b), hence ([^ ]|\\\\ )*.
+  # The tail rejects unescaped shell metacharacters: %q-escaped input never
+  # produces bare ; & | < > $ \` so a compliant rtk rewrite never needs them.
+  rtk_shape='^(sudo +)?(env +([A-Za-z_][A-Za-z0-9_]*=([^ ]|\\\\ )* +)*)?rtk (\\\\.|[^;&|<>$\`\\\\])+$'
   if [[ -n "\${rewritten_command}" && "\${rewritten_command}" != "\${original_command}" \\
         && "\${rewritten_command}" != *$'\\n'* \\
         && "\${rewritten_command}" =~ \$rtk_shape ]]; then

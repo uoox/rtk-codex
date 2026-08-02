@@ -129,14 +129,46 @@ async function fetchText(url: string): Promise<string> {
   return await response.text();
 }
 
-export async function updateSupportedCommands(options: { refOverride?: string; skipSync?: boolean } = {}): Promise<void> {
+export function detectRtkVersion(): string | null {
+  try {
+    const result = runCommand("rtk", ["--version"]);
+    const match = result.status === 0 ? result.stdout.match(/^rtk (\d+\.\d+\.\d+)/) : null;
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function warnIfRtkMissing(): void {
+  if (detectRtkVersion() === null) {
+    process.stderr.write(
+      "warning: 'rtk' not found on PATH (or not Rust Token Killer — beware the Rust Type Kit name collision).\n" +
+        "         Shims are installed but will fall back to the real binaries until rtk works.\n",
+    );
+  }
+}
+
+export async function updateSupportedCommands(options: { refOverride?: string; skipSync?: boolean; force?: boolean } = {}): Promise<void> {
   const paths = getCliPaths();
   const upstreamRepo = "rtk-ai/rtk";
-  const ref = options.refOverride
-    ? options.refOverride
-    : (await readFile(paths.rtkUpstreamRefFile, "utf8")).trim();
-  const rulesUrl = `https://raw.githubusercontent.com/${upstreamRepo}/${ref}/src/discover/rules.rs`;
-  const rulesText = await fetchText(rulesUrl);
+  const pinnedRef = (await readFile(paths.rtkUpstreamRefFile, "utf8")).trim();
+  const localVersion = detectRtkVersion();
+
+  // Prefer, in order: explicit --ref, the tag matching the local rtk binary,
+  // the pinned ref. A missing tag (e.g. dev build of rtk) falls back to pinned.
+  let ref = options.refOverride ?? (localVersion ? `v${localVersion}` : pinnedRef);
+  const rulesUrlFor = (r: string): string => `https://raw.githubusercontent.com/${upstreamRepo}/${r}/src/discover/rules.rs`;
+  let rulesText: string;
+  try {
+    rulesText = await fetchText(rulesUrlFor(ref));
+  } catch (error) {
+    if (options.refOverride || ref === pinnedRef) {
+      throw error;
+    }
+    process.stderr.write(`warning: no upstream ref '${ref}' for local rtk ${localVersion}; using pinned ${pinnedRef}\n`);
+    ref = pinnedRef;
+    rulesText = await fetchText(rulesUrlFor(ref));
+  }
 
   const commands = new Set<string>();
   const blockRegex = /rewrite_prefixes:\s*&\[(.*?)\]/gs;
@@ -155,6 +187,20 @@ export async function updateSupportedCommands(options: { refOverride?: string; s
   const extraText = (await readTextIfExists(paths.shimCommandsExtraFile)) ?? "";
   const extraCommands = parseCommandNames(extraText);
   const upstreamCommands = uniqSorted(commands);
+
+  // Guardrails: if the upstream rules.rs format changes, the regex above can
+  // silently produce an empty/truncated manifest, and syncShims would then
+  // delete every existing wrapper. Refuse implausible shrinkage.
+  const previousUpstream = parseCommandNames((await readTextIfExists(paths.shimCommandsUpstreamFile)) ?? "");
+  if (upstreamCommands.length === 0) {
+    throw new Error(`no rewrite_prefixes found in upstream rules.rs at ${ref}; refusing to write an empty manifest`);
+  }
+  if (!options.force && previousUpstream.length > 0 && upstreamCommands.length < previousUpstream.length * 0.7) {
+    throw new Error(
+      `upstream manifest shrank from ${previousUpstream.length} to ${upstreamCommands.length} commands at ${ref}; ` +
+        "rerun with --force if this is intentional",
+    );
+  }
   const mergedCommands = uniqSorted([...upstreamCommands, ...extraCommands]);
 
   await writeFile(
@@ -168,7 +214,7 @@ export async function updateSupportedCommands(options: { refOverride?: string; s
     "utf8",
   );
 
-  if (options.refOverride) {
+  if (ref !== pinnedRef) {
     await writeFile(paths.rtkUpstreamRefFile, `${ref}\n`, "utf8");
   }
 
@@ -265,7 +311,9 @@ function replaceManagedBlock(existingText: string, managedBlock: string): string
   );
 
   if (managedRegex.test(existingText)) {
-    return existingText.replace(managedRegex, normalizedBlock).replace(/\n{3,}/g, "\n\n");
+    // Function replacement: the block contains user paths where $& etc. would
+    // otherwise be expanded as replacement patterns.
+    return existingText.replace(managedRegex, () => normalizedBlock).replace(/\n{3,}/g, "\n\n");
   }
 
   const existingBlock = findShellEnvironmentBlock(existingText);
@@ -300,6 +348,7 @@ export async function installCodexConfig(options: { shimRoot?: string; logFile?:
   const configFile = path.join(codexHome, "config.toml");
   const logFile = options.logFile ?? getDefaultLogFile();
 
+  warnIfRtkMissing();
   await installShims(shimRoot);
   await mkdir(codexHome, { recursive: true });
 
@@ -337,6 +386,64 @@ export async function uninstallCodexConfig(): Promise<void> {
   const newText = existingText.replace(managedRegex, "").replace(/\n{3,}/g, "\n\n").trimEnd();
   await writeFile(configFile, newText ? `${newText}\n` : "", "utf8");
   process.stdout.write(`Removed RTK shim config block from ${configFile}\n`);
+}
+
+export async function doctor(): Promise<void> {
+  const paths = getCliPaths();
+  const shimRoot = getDefaultShimHome();
+  const shimBinDir = path.join(shimRoot, "bin");
+  const problems: string[] = [];
+  const report = (ok: boolean, message: string): void => {
+    process.stdout.write(`${ok ? "[ok]" : "[!!]"} ${message}\n`);
+    if (!ok) {
+      problems.push(message);
+    }
+  };
+
+  const rtkVersion = detectRtkVersion();
+  report(rtkVersion !== null, rtkVersion ? `rtk ${rtkVersion} on PATH` : "rtk not found on PATH (all shims fall back)");
+
+  const pinnedRef = ((await readTextIfExists(paths.rtkUpstreamRefFile)) ?? "").trim();
+  if (rtkVersion) {
+    report(
+      pinnedRef === `v${rtkVersion}`,
+      `manifest ref ${pinnedRef || "(none)"} vs local rtk v${rtkVersion}${pinnedRef === `v${rtkVersion}` ? "" : " — run: rtk-codex update"}`,
+    );
+  }
+
+  const wrappers = existsSync(shimBinDir) ? (await readdir(shimBinDir)).filter((name) => name !== "rtk-shim") : [];
+  report(wrappers.length > 0, `${wrappers.length} shims installed in ${shimBinDir}`);
+
+  const configFile = path.join(getCodexHome(), "config.toml");
+  const configText = (await readTextIfExists(configFile)) ?? "";
+  const hasBlock = configText.includes(MANAGED_START);
+  report(hasBlock, hasBlock ? `Codex managed block present in ${configFile}` : `no Codex managed block in ${configFile}`);
+  if (hasBlock) {
+    const stored = configText.match(/RTK_SHIM_REAL_PATH = "((?:[^"\\]|\\.)*)"/)?.[1]?.replaceAll('\\"', '"').replaceAll("\\\\", "\\");
+    const current = buildRealPath(paths.repoRoot, shimBinDir);
+    report(
+      stored === current,
+      stored === current
+        ? "Codex PATH snapshot matches current shell PATH"
+        : "Codex PATH snapshot drifted from current shell PATH — rerun: rtk-codex install",
+    );
+  }
+
+  const rcFile = getDefaultShellRcFile();
+  const rcText = (await readTextIfExists(rcFile)) ?? "";
+  const hasShellHook = rcText.includes(SHELL_HOOK_START);
+  report(hasShellHook, hasShellHook ? `shell hook present in ${rcFile}` : `no shell hook in ${rcFile} (Antigravity sessions not covered)`);
+
+  const logFile = getDefaultLogFile();
+  if (existsSync(logFile)) {
+    const mode = (await stat(logFile)).mode & 0o777;
+    report(mode === 0o600, `${logFile} mode ${mode.toString(8)}${mode === 0o600 ? "" : " (expected 600)"}`);
+  }
+
+  process.stdout.write(problems.length === 0 ? "All checks passed\n" : `${problems.length} problem(s) found\n`);
+  if (problems.length > 0) {
+    process.exitCode = 1;
+  }
 }
 
 const SHELL_HOOK_START = "# BEGIN RTK SHIM SHELL HOOK";
@@ -378,13 +485,14 @@ export async function installShellHook(options: { shimRoot?: string; rcFile?: st
   const shimRoot = options.shimRoot ?? getDefaultShimHome();
   const rcFile = options.rcFile ?? getDefaultShellRcFile();
 
+  warnIfRtkMissing();
   await installShims(shimRoot);
 
   const block = normalizeNewline(buildShellHookBlock(shimRoot).trimEnd());
   const existingText = (await readTextIfExists(rcFile)) ?? "";
   const regex = shellHookRegex();
   const newText = regex.test(existingText)
-    ? existingText.replace(regex, block)
+    ? existingText.replace(regex, () => block)
     : `${existingText.trimEnd()}${existingText.trim() ? "\n\n" : ""}${block}`;
   await writeFile(rcFile, normalizeSpacing(newText), "utf8");
   process.stdout.write(`Installed RTK shim shell hook into ${rcFile}\n`);

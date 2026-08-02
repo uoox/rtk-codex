@@ -3,7 +3,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { installCodexConfig, installShellHook, testCodexConfig, testShellHook, testShims, uninstallCodexConfig, uninstallShellHook, updateSupportedCommands, validateTmux } from "./core.js";
+import { doctor, installCodexConfig, installShellHook, testCodexConfig, testShellHook, testShims, uninstallCodexConfig, uninstallShellHook, updateSupportedCommands, validateTmux } from "./core.js";
 
 function printHelp(version: string): void {
   process.stdout.write(`rtk-codex ${version}
@@ -16,7 +16,8 @@ Commands:
   uninstall       Remove only the managed Codex config block
   install-shell   Install shims plus a shell rc hook for AI agent sessions (Antigravity)
   uninstall-shell Remove the managed shell rc hook
-  update          Refresh shim coverage from the pinned RTK upstream ref
+  update          Refresh shim coverage (defaults to the tag of the local rtk binary)
+  doctor          Check rtk presence, manifest freshness, config drift, log perms
   validate-tmux   Run end-to-end Codex CLI validation in tmux
   test-config     Run installer/config tests
   test-shims      Run low-level shim rewrite tests
@@ -61,6 +62,7 @@ async function main(): Promise<void> {
       return;
     case "update": {
       let refOverride: string | undefined;
+      let force = false;
       for (let index = 1; index < args.length; index += 1) {
         if (args[index] === "--ref") {
           refOverride = args[index + 1];
@@ -68,13 +70,18 @@ async function main(): Promise<void> {
             throw new Error("missing value for --ref");
           }
           index += 1;
+        } else if (args[index] === "--force") {
+          force = true;
         } else {
           throw new Error(`unknown argument: ${args[index]}`);
         }
       }
-      await updateSupportedCommands({ refOverride });
+      await updateSupportedCommands({ refOverride, force });
       return;
     }
+    case "doctor":
+      await doctor();
+      return;
     case "validate-tmux":
       await validateTmux(args[1] ?? "rtk-codex-validate");
       return;
